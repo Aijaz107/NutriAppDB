@@ -96,16 +96,34 @@ def add_dish():
 # Read operation - Display all dishes on menu
 @app.route('/')
 def get_menu():
+    
+    def get_image(item):
+        print("inside")
+        response = requests.get(f'https://api.edamam.com/search?app_id=900da95e&app_key=40698503668e0bb3897581f4766d77f9&q={item}', timeout=5)
+        response.raise_for_status()
+        response = response.json()
+        if response['hits']:
+            return response['hits'][0]['recipe']['image']
+        
+        return "https://www.clipartmax.com/png/middle/109-1094645_we-will-now-be-serving-supper-bowl-of-soup-animated.png"
+        
     try:
         conn = sqlite3.connect('nutri.db')
         c = conn.cursor()
         c.execute("SELECT * FROM menu WHERE deleted_at IS NULL")
+        print("line 111")
+        # print(c.fetchall())
+        # print(type(c.fetchall()))
+        # for r in c.fetchall():
+        #     print(r)
+        #     print(r[1])
         menu = [{'menu_number': row[0], 'dish_name': row[1], 'description': row[2],
                  'ingredients': row[3], 'price': row[4], 'avg_time_taken': row[5],
                  'disease_list': row[6], 'recipe_description': row[7],
-                 'calories': row[8], 'created_date': row[9], 'updated_at': row[10], 'deleted_at': row[11]} for row in c.fetchall()]
+                 'calories': row[8], 'created_date': row[9], 'updated_at': row[10], 'deleted_at': row[11], 'image': get_image(row[3])} for row in c.fetchall()]
         conn.close()
         
+        print(menu)
         menu_res = {}
         
         menu_res['menu'] = menu
@@ -240,6 +258,31 @@ def audio_dishes():
             text = data["text"]
         except KeyError:
             return jsonify({"error": "Invalid request format. Make sure to provide 'text' in the request payload."}), 400
+
+        txt_len = len(text.split())
+        first_recipes = []
+        if txt_len < 5:
+            response = requests.get(f'https://api.edamam.com/search?app_id=900da95e&app_key=40698503668e0bb3897581f4766d77f9&q={text}', timeout=5)
+            response.raise_for_status()
+            response = response.json()
+            
+            for i in range(8):
+                temp ={}
+                temp['lable'] = response['hits'][i]['recipe']['label']
+                temp['image'] = response['hits'][i]['recipe']['image']
+                temp['ingredients'] = response['hits'][i]['recipe']['ingredientLines']
+                temp['totalNutrients'] = response['hits'][i]['recipe']['totalNutrients']
+                temp['calories'] = response['hits'][i]['recipe']['calories']
+                temp['url'] = response['hits'][i]['recipe']['url']
+                temp['price'] = random.randint(3, 30)
+                
+                first_recipes.append(temp)
+                
+            recipes_res ={}
+            
+            recipes_res['dishes'] =first_recipes
+                
+            return jsonify(recipes_res) 
 
         response = client.analyze(text)
         generated_keywords = [entity.id.lower() for entity in response.entities()]
