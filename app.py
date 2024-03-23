@@ -105,7 +105,12 @@ def get_menu():
                  'disease_list': row[6], 'recipe_description': row[7],
                  'calories': row[8], 'created_date': row[9], 'updated_at': row[10], 'deleted_at': row[11]} for row in c.fetchall()]
         conn.close()
-        return jsonify(menu)
+        
+        menu_res = {}
+        
+        menu_res['menu'] = menu
+        
+        return jsonify(menu_res)
     except Exception as e:
         return jsonify(error=str(e)), 500
 
@@ -316,8 +321,11 @@ def audio_dishes():
         except ValueError:
             recipes.append({'error': f'Invalid JSON response for keyword: {keyword}'})
 
+        recipes_res ={}
+        
+        recipes_res['dishes'] =recipes
             
-        return jsonify(recipes)     
+        return jsonify(recipes_res)     
 
 @app.route("/keywords_from_audio", methods=["POST"])
 def keywords_from_audio():
