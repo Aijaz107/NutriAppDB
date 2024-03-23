@@ -228,7 +228,7 @@ def get_recipes():
 
 
 @app.route("/audio_dishes", methods=["POST"])
-def home():
+def audio_dishes():
     if request.method == "POST":
         try:
             data = request.get_json(force=True)
@@ -318,6 +318,27 @@ def home():
 
             
         return jsonify(recipes)     
+
+@app.route("/keywords_from_audio", methods=["POST"])
+def keywords_from_audio():
+    if request.method == "POST":
+        try:
+            data = request.get_json(force=True)
+            text = data["text"]
+        except KeyError:
+            return jsonify({"error": "Invalid request format. Make sure to provide 'text' in the request payload."}), 400
+
+        response = client.analyze(text)
+        generated_keywords = [entity.id.lower() for entity in response.entities()]
+
+        filtered_generated_keywords = filter_generated_keywords(generated_keywords)
+        filtered_base_keywords = filter_base_keywords(filtered_generated_keywords)
+
+        print(filtered_base_keywords)
+        
+        result = list(set(filtered_base_keywords))
+        
+        return jsonify({"keywords": result})
 
 
 if __name__ == '__main__':
