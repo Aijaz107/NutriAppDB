@@ -12,8 +12,7 @@ client = textrazor.TextRazor(extractors=["entities", "topics"])
 
 app = Flask(__name__)
 
-# Function to create the menu table
-def create_menu_table():
+def create_tables():
     conn = sqlite3.connect('nutri.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS menu
@@ -21,10 +20,18 @@ def create_menu_table():
                  ingredients TEXT, price REAL, avg_time_taken INTEGER, disease_list TEXT, 
                  recipe_description TEXT, calories INTEGER, created_date TEXT DEFAULT CURRENT_TIMESTAMP,
                  updated_at TEXT DEFAULT NULL, deleted_at TEXT DEFAULT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS orders
+                 (order_id INTEGER PRIMARY KEY, total_bill REAL, customer_name TEXT, preferences TEXT,
+                 created_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TEXT DEFAULT NULL, deleted_at TEXT DEFAULT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS order_items
+                 (order_item_id INTEGER PRIMARY KEY, order_id INTEGER, dish_name TEXT, quantity INTEGER,
+                 imagelink TEXT, price REAL,
+                 FOREIGN KEY (order_id) REFERENCES orders(order_id))''')
     conn.commit()
     conn.close()
 
-create_menu_table()
+create_tables()
 
 # Error handling decorator
 @app.errorhandler(Exception)
@@ -191,7 +198,7 @@ def get_recipes():
                 temp['totalNutrients'] = response['hits'][i]['recipe']['totalNutrients']
                 temp['calories'] = response['hits'][i]['recipe']['calories']
                 temp['url'] = response['hits'][i]['recipe']['url']
-                temp['price'] = random.randint(3, 30)
+                temp['price'] = int(random.randint(3, 30))
                 
                 recipes.append(temp)
         
@@ -228,11 +235,12 @@ def get_recipes():
             response = requests.get(f'https://api.edamam.com/search?app_id=900da95e&app_key=40698503668e0bb3897581f4766d77f9&q={row[3]}', timeout=5)
             response.raise_for_status()
             response = response.json()
-            
+            price_int = int(row[4])
+            print("proce int", price_int )
             dish = {
                 'label': row[1],
                 'ingredients': row[3],
-                'price': row[4],
+                'price': price_int,
                 'recipe_description': row[7],
                 'calories': row[8],
                 'totalNutrients': row[8],
@@ -247,7 +255,12 @@ def get_recipes():
         recipes.append({'error': f'Invalid JSON response for keyword: {keyword}'})
 
     print(len(recipes))
-    return jsonify(recipes)     
+    
+    r_obj = {}
+    
+    r_obj['dishes'] = recipes 
+    
+    return jsonify(r_obj)     
 
 
 @app.route("/audio_dishes", methods=["POST"])
@@ -379,6 +392,10 @@ def keywords_from_audio():
         except KeyError:
             return jsonify({"error": "Invalid request format. Make sure to provide 'text' in the request payload."}), 400
 
+        if len(text.split()) < 5:
+            filtered_generated_keywords = filter_generated_keywords(text.split())
+            filtered_base_keywords = filter_base_keywords(filtered_generated_keywords)
+            return jsonify({"keywords": filtered_base_keywords})
         response = client.analyze(text)
         generated_keywords = [entity.id.lower() for entity in response.entities()]
 
@@ -390,6 +407,75 @@ def keywords_from_audio():
         result = list(set(filtered_base_keywords))
         
         return jsonify({"keywords": result})
+    
+    
+# Place an order
+@app.route('/place_order', methods=['POST'])
+def place_order():
+    try:
+        data = request.json
+        dishes = data.get('dishes', [])
+        conn = sqlite3.connect('nutri.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO orders (total_bill, customer_name, preferences) VALUES (?, ?, ?)",
+                  (data['total_bill'], data['customer_name'], data.get('preferences', '')))
+        order_id = c.lastrowid
+        for dish in dishes:
+            c.execute("INSERT INTO order_items (order_id, dish_name, quantity, imagelink, price) VALUES (?, ?, ?, ?, ?)",
+                      (order_id, dish['dish_name'], dish['quantity'], dish['imagelink'], dish['price']))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Order placed successfully'}), 201
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+# Get all orders
+@app.route('/get_orders', methods=['GET'])
+def get_orders():
+    try:
+        conn = sqlite3.connect('nutri.db')
+        c = conn.cursor()
+        c.execute("SELECT * FROM orders WHERE deleted_at IS NULL")
+        orders = [{'order_id': row[0], 'total_bill': row[1], 'customer_name': row[2], 'preferences': row[3],
+                   'created_date': row[4], 'updated_at': row[5], 'deleted_at': row[6]} for row in c.fetchall()]
+        for order in orders:
+            c.execute("SELECT * FROM order_items WHERE order_id=?", (order['order_id'],))
+            items = [{'dish_name': row[2], 'quantity': row[3], 'imagelink': row[4], 'price': row[5]} for row in c.fetchall()]
+            order['dishes'] = items
+        conn.close()
+        orders_json ={}
+        orders_json['orders'] = orders 
+        return jsonify(orders_json)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+# Update an order
+@app.route('/update_order/<int:order_id>', methods=['PUT'])
+def update_order(order_id):
+    try:
+        data = request.json
+        conn = sqlite3.connect('nutri.db')
+        c = conn.cursor()
+        c.execute("UPDATE orders SET total_bill=?, customer_name=?, preferences=?, updated_at=? WHERE order_id=?", 
+                  (data['total_bill'], data['customer_name'], data.get('preferences', ''), datetime.now(), order_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Order updated successfully'}), 200
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+# Delete an order
+@app.route('/delete_order/<int:order_id>', methods=['DELETE'])
+def delete_order(order_id):
+    try:
+        conn = sqlite3.connect('nutri.db')
+        c = conn.cursor()
+        c.execute("UPDATE orders SET deleted_at=? WHERE order_id=?", (datetime.now(), order_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': 'Order deleted successfully'}), 200
+    except Exception as e:
+        return jsonify(error=str(e)), 500
 
 
 if __name__ == '__main__':
