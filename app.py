@@ -1,9 +1,15 @@
 import random
-from flask import Flask, request, jsonify
+from flask import Flask, redirect, request, jsonify
 import sqlite3
 import textrazor
 from datetime import datetime
 from difflib import SequenceMatcher
+import os
+import tempfile
+import textract
+import pandas as pd
+import re
+import pdfplumber
 
 import requests
 
@@ -105,7 +111,6 @@ def add_dish():
 def get_menu():
     
     def get_image(item):
-        print("inside")
         response = requests.get(f'https://api.edamam.com/search?app_id=900da95e&app_key=40698503668e0bb3897581f4766d77f9&q={item}', timeout=5)
         response.raise_for_status()
         response = response.json()
@@ -117,23 +122,50 @@ def get_menu():
     try:
         conn = sqlite3.connect('nutri.db')
         c = conn.cursor()
-        c.execute("SELECT * FROM menu WHERE deleted_at IS NULL")
-        print("line 111")
+        # c.execute("SELECT * FROM menu WHERE deleted_at IS NULL ORDER BY created_date DESC LIMIT 15")
+        c.execute('''
+            SELECT * 
+            FROM menu 
+            WHERE (dish_name, created_date) IN (
+                SELECT dish_name, MAX(created_date)
+                FROM menu 
+                WHERE deleted_at IS NULL
+                GROUP BY dish_name
+            )
+            ORDER BY created_date DESC
+            LIMIT 15;
+        ''')        
         # print(c.fetchall())
-        # print(type(c.fetchall()))
-        # for r in c.fetchall():
-        #     print(r)
-        #     print(r[1])
-        menu = [{'menu_number': row[0], 'dish_name': row[1], 'description': row[2],
-                 'ingredients': row[3], 'price': row[4], 'avg_time_taken': row[5],
-                 'disease_list': row[6], 'recipe_description': row[7],
-                 'calories': row[8], 'created_date': row[9], 'updated_at': row[10], 'deleted_at': row[11], 'image': get_image(row[3])} for row in c.fetchall()]
+        totoal_records = c.fetchall()
+        print("lin 128")
+        menu_items = []
+        for row in totoal_records:
+            menu_item = {
+            'menu_number': row[0],
+            'dish_name': row[1],
+            'description': row[2],
+            'ingredients': row[3],
+            'price': row[4],
+            'avg_time_taken': row[5],
+            'disease_list': row[6],
+            'recipe_description': row[7],
+            'calories': row[8],
+            'created_date': row[9],
+            'updated_at': row[10],
+            'deleted_at': row[11],
+            'image': get_image(row[3])  # Assuming row[3] contains image information
+        }
+            menu_items.append(menu_item)
+        # menu = [{'menu_number': row[0], 'dish_name': row[1], 'description': row[2],
+        #          'ingredients': row[3], 'price': row[4], 'avg_time_taken': row[5],
+        #          'disease_list': row[6], 'recipe_description': row[7],
+        #          'calories': row[8], 'created_date': row[9], 'updated_at': row[10], 'deleted_at': row[11], 'image': get_image(row[3])} for row in c.fetchall()]
+        
         conn.close()
         
-        print(menu)
         menu_res = {}
         
-        menu_res['menu'] = menu
+        menu_res['menu'] = menu_items
         
         return jsonify(menu_res)
     except Exception as e:
@@ -227,8 +259,6 @@ def get_recipes():
         # Executing the query with keyword matching
         c.execute(query, bindings)
         
-        print( c.fetchall())
-
         combined_list = [item for sublist in db_matches for item in sublist]
 
         for row in combined_list:
@@ -236,7 +266,6 @@ def get_recipes():
             response.raise_for_status()
             response = response.json()
             price_int = int(row[4])
-            print("proce int", price_int )
             dish = {
                 'label': row[1],
                 'ingredients': row[3],
@@ -253,8 +282,6 @@ def get_recipes():
         recipes.append({'error': f'Failed to fetch recipes for keyword: {keyword}. {e}'})
     except ValueError:
         recipes.append({'error': f'Invalid JSON response for keyword: {keyword}'})
-
-    print(len(recipes))
     
     r_obj = {}
     
@@ -302,8 +329,6 @@ def audio_dishes():
 
         filtered_generated_keywords = filter_generated_keywords(generated_keywords)
         filtered_base_keywords = filter_base_keywords(filtered_generated_keywords)
-
-        print(filtered_base_keywords)
         
         filtered_base_keywords = list(set(filtered_base_keywords))
         
@@ -351,8 +376,6 @@ def audio_dishes():
             # Executing the query with keyword matching
             c.execute(query, bindings)
             
-            print( c.fetchall())
-
             combined_list = [item for sublist in db_matches for item in sublist]
 
             for row in combined_list:
@@ -401,9 +424,7 @@ def keywords_from_audio():
 
         filtered_generated_keywords = filter_generated_keywords(generated_keywords)
         filtered_base_keywords = filter_base_keywords(filtered_generated_keywords)
-
-        print(filtered_base_keywords)
-        
+                
         result = list(set(filtered_base_keywords))
         
         return jsonify({"keywords": result})
@@ -476,6 +497,199 @@ def delete_order(order_id):
         return jsonify({'message': 'Order deleted successfully'}), 200
     except Exception as e:
         return jsonify(error=str(e)), 500
+    
+ALLOWED_EXTENSIONS = {'pdf', 'xlsx','.xls'}
+app.config['UPLOAD_FOLDER'] = 'uploads'
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+ 
+# Function to handle file uploads
+@app.route('/upload_menu', methods=['POST'])
+def upload_menu():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part in the request'}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected for uploading'}), 400
+        
+        if file and allowed_file(file.filename):
+            filename = file.filename
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            
+            # Delete the temporary file
+            remove_files_in_folder(app.config['UPLOAD_FOLDER'])
+            
+            file.save(file_path)
+
+            # Extract text based on file extension
+            file_extension = os.path.splitext(filename)[1].lower()
+            if file_extension == '.pdf':
+                text = extract_text_from_pdf(file_path)
+                
+                menu_dict = {}
+
+                # Regular expression to find lines with prices
+                price_pattern = r"(.+)\s(\d+)\s\$"
+
+                lines = text.split('\n')
+                for line in lines:
+                    match = re.match(price_pattern, line)
+                    if match:
+                        menu_item = match.group(1).strip()
+                        price = int(match.group(2))
+                        menu_dict[menu_item] = price
+                
+                save_menu_file_db(menu_dict)
+                
+            elif file_extension == '.docx':
+                text = extract_text_from_docx(file_path)
+            elif file_extension in ['.xlsx', '.xls']:
+                data = extract_text_from_excel(file_path)
+                
+                save_menu_file_db(data)
+                
+            elif file_extension == '.csv':
+                text = extract_text_from_csv(file_path)
+            else:
+                os.remove(file_path)
+                return jsonify({'error': 'Unsupported file type. Supported types: PDF, DOCX, XLSX, CSV'}), 400
+
+            return jsonify({'message': 'Menu uploaded successfully'}), 200
+        else:
+            return jsonify({'error': 'Invalid file type'}), 400
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    
+def remove_files_in_folder(folder_path):
+    try:
+        # List all files in the folder
+        files = os.listdir(folder_path)
+        
+        # Iterate through each file and remove it
+        for file in files:
+            file_path = os.path.join(folder_path, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                print(f"Removed: {file_path}")
+        
+        print("All files removed successfully.")
+        
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def save_menu_file_db(menu_items):
+    
+    print(menu_items)
+    conn = sqlite3.connect('nutri.db')
+    c = conn.cursor()
+
+    for dish_name, price in menu_items.items():
+        c.execute('''INSERT INTO menu (dish_name, description, ingredients, price,avg_time_taken,calories)
+                     VALUES (?, ?, ?,?,?,?)''', (dish_name, '', dish_name,price,random.randint(5, 30),random.randint(20, 1000)))  # Assuming other fields are left empty or default
+
+    conn.commit()
+    conn.close()
+    
+    # drop_duplicates()
+
+# Function to extract menu items from a PDF file
+def extract_menu_items(pdf_path):
+    with pdfplumber.open(pdf_path) as pdf:
+        text = ""
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
+
+def drop_duplicates():
+    conn = sqlite3.connect('nutri.db')
+    c = conn.cursor()
+    
+    # Create a temporary table to store non-duplicate records
+    c.execute('''CREATE TEMP TABLE temp_table AS
+                 SELECT MIN(rowid) as rowid, dish_name, description, ingredients, price, avg_time_taken, disease_list, recipe_description, calories, created_date, updated_at, deleted_at
+                 FROM menu
+                 GROUP BY dish_name''')
+    
+    # Delete duplicate records from the original table
+    c.execute('''DELETE FROM menu
+                 WHERE rowid NOT IN (SELECT rowid FROM temp_table)''')
+    
+    # Insert new records from the temp table into the original table
+    c.execute('''INSERT INTO menu
+                 SELECT * FROM temp_table
+                 WHERE rowid NOT IN (SELECT rowid FROM menu)''')
+
+    # Drop the temporary table
+    c.execute('''DROP TABLE temp_table''')
+
+    conn.commit()
+    conn.close()
+    
+    
+# Function to extract text from PDF files
+def extract_text_from_pdf(file_path):
+    print(file_path)
+    menu_text = extract_menu_items(file_path)
+    return menu_text
+
+# Function to extract text from DOCX files
+def extract_text_from_docx(file_path):
+    text = textract.process(file_path, encoding='utf-8')
+    return text.decode('utf-8')
+
+# Function to extract text from Excel files
+def extract_text_from_excel(file_path):
+    data = {}
+    try:
+        df = pd.read_excel(file_path)
+        # Dropping rows with NaN values
+        df = df.dropna(subset=['Name', 'Price'])
+        for index, row in df.iterrows():
+            # Assuming 'Name' and 'Price' are the column names
+            name = str(row['Name'])
+            # Checking if price is numeric
+            if pd.notna(row['Price']) and pd.to_numeric(row['Price'], errors='coerce') == row['Price']:
+                # Converting price to a number
+                price = float(row['Price'])
+                data[name] = price
+    except FileNotFoundError:
+        print("File not found.")
+        return None
+    except Exception as e:
+        print("An error occurred:", e)
+        return None
+    
+    return data
+
+# Function to extract text from CSV files
+def extract_text_from_csv(file_path):
+    data = {}
+    try:
+        df = pd.read_csv(file_path)
+        # Dropping rows with NaN values
+        df = df.dropna(subset=['Name', 'Price'])
+        for index, row in df.iterrows():
+            # Assuming 'Name' and 'Price' are the column names
+            name = str(row['Name'])
+            # Checking if price is numeric
+            if pd.notna(row['Price']) and pd.to_numeric(row['Price'], errors='coerce') == row['Price']:
+                # Converting price to a number
+                price = float(row['Price'])
+                data[name] = price
+    except FileNotFoundError:
+        print("File not found.")
+        return None
+    except Exception as e:
+        print("An error occurred:", e)
+        return None
+    
+    return data
 
 
 if __name__ == '__main__':
